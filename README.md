@@ -211,8 +211,6 @@ This project builds on and is inspired by the [Opacus library](https://github.co
 ## Citation
 If you use this code in academic work, please cite the Opacus paper as well as this repository:
 
-<div align="right">📋 Copy</div>
-
 ```bibtex
 @article{d2p2Zhanhong,
   title={Balancing Utility and Privacy: Dynamically Private SGD with Random Projection},
