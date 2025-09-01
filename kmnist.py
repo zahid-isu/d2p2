@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-Runs MNIST training with differential privacy.
+Runs KMNIST training with differential privacy.
 
 """
 
@@ -37,8 +37,8 @@ import time
 
 
 # Precomputed characteristics of the MNIST dataset
-MNIST_MEAN = 0.1307
-MNIST_STD = 0.3081
+KMNIST_MEAN = 0.5
+KMNIST_STD = 0.5
 
 
 class SampleConvNet(nn.Module):
@@ -65,6 +65,7 @@ class SampleConvNet(nn.Module):
 
 def plot_combined_results(train_results, sigma, batch_size, seed):
 
+
     fig, axs = plt.subplots(2, figsize=(10, 10), dpi=400)
 
     # Plot training losses
@@ -88,15 +89,15 @@ def plot_combined_results(train_results, sigma, batch_size, seed):
 
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    filename = f'log/CNN_mnist/P200_red30_{current_time}_sigma_{sigma}_batch_{batch_size}_seed_{seed}'
-    fig.suptitle(f'CNN_MNIST_sigma_{sigma}_batch_{batch_size}', fontsize=16)
+    filename = f'final/CNN_kmnist/{current_time}_sigma_{sigma}_batch_{batch_size}_seed_{seed}'
+    fig.suptitle(f'CNN_KMNIST_sigma_{sigma}_batch_{batch_size}', fontsize=16)
     plt.savefig(f"{filename}.png")
     
     with open(f"{filename}.json", "w") as file:
         json.dump(train_results, file, indent=4)
 
 
-def train(args, model, device, train_loader, optimizer, privacy_engine, epoch):
+def train(args, model, device, train_loader, optimizer,dp_mode, privacy_engine, epoch):
     model.train()
     criterion = nn.CrossEntropyLoss()
     losses = []
@@ -110,6 +111,7 @@ def train(args, model, device, train_loader, optimizer, privacy_engine, epoch):
         loss.backward()
         optimizer.step()
         losses.append(loss.item())
+        
 
         if _batch_idx % args.print_freq == 0:
             if not args.disable_dp:
@@ -123,8 +125,11 @@ def train(args, model, device, train_loader, optimizer, privacy_engine, epoch):
             else:
                 epsilon=0
                 print(f"Train Epoch: {epoch} \t Loss: {np.mean(losses):.6f}")
-
-    return losses, epsilon
+    
+    if dp_mode =="dynamic" or dp_mode =="d2p2":
+        return losses, optimizer.noise_multiplier, epsilon
+    else:
+        return losses, args.sigma, epsilon
 
 def test(model, device, test_loader):
     model.eval()
@@ -173,35 +178,35 @@ def main():
         print("random_projection=", random_projection)
 
         train_loader = torch.utils.data.DataLoader(
-            datasets.MNIST(
+            datasets.KMNIST(
                 args.data_root,
                 train=True,
                 download=True,
                 transform=transforms.Compose(
                     [
                         transforms.ToTensor(),
-                        transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
+                        transforms.Normalize((KMNIST_MEAN,), (KMNIST_STD,)),
                     ]
                 ),
             ),
             batch_size=args.batch_size,
-            num_workers=8,
+            num_workers=16,
             pin_memory=True,
         )
         test_loader = torch.utils.data.DataLoader(
-            datasets.MNIST(
+            datasets.KMNIST(
                 args.data_root,
                 train=False,
                 transform=transforms.Compose(
                     [
                         transforms.ToTensor(),
-                        transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
+                        transforms.Normalize((KMNIST_MEAN,), (KMNIST_STD,)),
                     ]
                 ),
             ),
             batch_size=args.test_batch_size,
             shuffle=True,
-            num_workers=8,
+            num_workers=16,
             pin_memory=True,
         )
         run_results = []
@@ -239,6 +244,7 @@ def main():
             accuracy_per_epoch = []
             train_losses =[]
             epsilon_per_epoch = []
+            sigma_per_epoch =[]
 
 
             for epoch in range(1, args.epochs + 1):
@@ -257,17 +263,19 @@ def main():
 
                     print(f"Epoch {epoch}: Updated d2p2 sigma to {new_noise_multiplier:.4f}")
                 
-                losses, epsilon = train(args, model, device, train_loader, optimizer, privacy_engine, epoch)
+                losses, sigma, epsilon = train(args, model, device, train_loader, optimizer,dp_mode, privacy_engine, epoch)
                 top1_acc = test(model, device, test_loader)
                 train_loss = np.mean(losses)
                 accuracy_per_epoch.append(float(top1_acc))
                 train_losses.append(train_loss)
                 epsilon_per_epoch.append(epsilon)
-            # run_results.append(top1_acc)
+                sigma_per_epoch.append(sigma)
+
             train_results[dp_label] = {
                 'loss': train_losses,
                 'acc': accuracy_per_epoch,
-                'ep': epsilon_per_epoch
+                'ep': epsilon_per_epoch,
+                'sigma':sigma_per_epoch
             }
             print(train_results)
         
@@ -276,7 +284,7 @@ def main():
 def parse_args():
     # Training settings
     parser = argparse.ArgumentParser(
-        description="Opacus MNIST Example",
+        description="Opacus KMNIST Example",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -301,7 +309,7 @@ def parse_args():
         "-n",
         "--epochs",
         type=int,
-        default=50,
+        default=1,
         metavar="N",
         help="number of epochs to train",
     )
@@ -386,7 +394,6 @@ def parse_args():
         metavar="N",
         help="print frequency (default: 10)",
     )
-
     return parser.parse_args()
 
     # if len(run_results) > 1:

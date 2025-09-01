@@ -1,98 +1,227 @@
+# [Balancing Utility and Privacy: Dynamically Private SGD with Random Projection (TMLR 2025)](https://openreview.net/pdf?id=u6OSRdkAwl)
 
-``` python examples/cifar10.py --epochs 10 --sigma 1.1 --checkpoint-file "/home/zahid/work/d2p2/ckpt" --log-dir "/home/zahid/work/d2p2/log" --local_rank -1
-```
+This README file describes how to set up the environment, run training scripts for different models/datasets and store training outputs (JSON/plots).
 
-## Installation
-The latest release of Opacus can be installed via `pip`:
+
+## Models and Datasets
+| Models | Datasets | Script file(s) |
+|---|---|---|
+| `LinearModel` `MultilayerPerceptron` `LogisticRegression` | MNIST-family (`MNIST` `FMNIST` `KMNIST` `EMNIST`) | `mnist.py`, `fmnist.py`, `kmnist.py`, `emnist.py` |
+| `ConvolutionalNeuralNet` | CIFAR-10 (adaptable to MNIST) | `cifar10.py` |
+| `DenseNet3` | CIFAR-10 | `cifar10.py` |
+| `ResNet20`, `ResNet20Small`, `ResNet20Medium` | CIFAR-10 | `cifar10.py` |
+
+Notes:
+- The `models.py` contains different model classes indicating it can be adapted for MNIST-like/other datasets by adjusting input channels and fully-connected layers.
+- If you add or modify models, update `models.py` and the corresponding call site in the script you intend to run.
+
+
+
+## 1) Create the environment
+The repository contains a conda environment file `env.yml`. It pins Python and PyTorch versions. Key versions from the YAML:
+- Python: 3.9+
+- PyTorch: 2.2.0 (with compatible `torchvision` and `torchaudio`)
+
+To create and activate the conda environment run:
+
 ```bash
-pip install opacus
-```
-OR, alternatively, via `conda`:
-```bash
-conda install -c conda-forge opacus
+conda env create -f env.yml
+conda activate d2p2
 ```
 
-You can also install directly from the source for the latest features (along with its quirks and potentially occasional bugs):
+## 2) Start training using `.sh` scripts
+There are convenience shell scripts in the repo to launch training. The scripts expose common hyper-parameters such as `batch_sizes` (training batch size), `red_rate` (reduction rate for random prjection), `sigma` (noise multiplier), `seeds` (random seed), device choice (CUDA index) and worker count. Example scripts include:
+
+- `run_cnn_cifar.sh` — launches the CNN training flow (the script calls `cifar10.py`).
+
+Typical run command:
+
 ```bash
-git clone https://github.com/pytorch/opacus.git
-cd opacus
-pip install -e .
+# make sure conda env is activated
+# from the repository root make the script executable
+chmod +x run_cnn_cifar.sh
+# run .sh file to start training
+./run_cnn_cifar.sh
 ```
 
-## Getting started
-To train your model with differential privacy, all you need to do is to instantiate a `PrivacyEngine` and pass your model, data_loader, and optimizer to the engine's `make_private()` method to obtain their private counterparts.
+How to change parameters:
+- The `.sh` script typically set variables like `BATCH_SIZE`, `SIGMA`, `RED_RATE`, `CUDA_DEVICE`, and `WORKERS`.
+
+Example snippet:
+```bash
+CUDA_DEVICE=0        # switch to 1 or other index as needed
+BATCH_SIZE=512
+SIGMA=3.0
+RED_RATE=0.3
+WORKERS=4
+python cifar2.py --batch-size $BATCH_SIZE --sigma $SIGMA --red_rate $RED_RATE --workers $WORKERS --device cuda:$CUDA_DEVICE
+```
+
+### DP modes (dp_mode)
+
+For example, `cifar10.py` iterates over a list of privacy modes in the code:
 
 ```python
-# define your components as usual
-model = Net()
-optimizer = SGD(model.parameters(), lr=0.05)
-data_loader = torch.utils.data.DataLoader(dataset, batch_size=1024)
-
-# enter PrivacyEngine
-privacy_engine = PrivacyEngine()
-model, optimizer, data_loader = privacy_engine.make_private(
-    module=model,
-    optimizer=optimizer,
-    data_loader=data_loader,
-    noise_multiplier=1.1,
-    max_grad_norm=1.0,
-)
-# Now it's business as usual
+for dp_mode in [ None, 'static', 'dynamic', 'RP', 'd2p2']:  # [SGD, DP-SGD, D2P-SGD, DP2-SGD]
 ```
 
-The [MNIST example](https://github.com/pytorch/opacus/tree/main/examples/mnist.py) shows an end-to-end run using Opacus. The [examples](https://github.com/pytorch/opacus/tree/main/examples/) folder contains more such examples.
+Short explanation of each value:
+- `None` — vanilla SGD (no differential privacy). `args.disable_dp` will be True for this mode.
+- `'static'` — standard DP-SGD with a fixed noise multiplier (`--sigma`) for all epochs.
+- `'dynamic'` — DP-SGD with a dynamic noise multiplier: the script reduces sigma each epoch (it sets
+  `optimizer.noise_multiplier = args.sigma / (epoch ** 0.25)` inside the training loop).
+- `'RP'` — DP-SGD with Random Projection. Use `--red_rate` to control the projection reduction rate; the optimizer
+  is configured with `optimizer.red_rate = args.red_rate` for this mode.
+- `'d2p2'` — a D2P2-style variant that combines dynamic sigma scheduling with random projection (also uses `--red_rate`).
 
-### Migrating to 1.0
+Notes
+- The simplest way to run only one mode is to edit that single line in `cifar10.py` and leave only the mode you want, for example:
 
-Opacus 1.0 introduced many improvements to the library, but also some breaking changes.
-If you've been using Opacus 0.x and want to update to the latest release,
-please use this [Migration Guide](https://github.com/pytorch/opacus/blob/main/Migration_Guide.md)
-
-
-## Learn more
-
-### Interactive tutorials
-
-We've built a series of IPython-based tutorials as a gentle introduction to training models
-with privacy and using various Opacus features.
-
-- [Building an Image Classifier with Differential Privacy](https://github.com/pytorch/opacus/blob/main/tutorials/building_image_classifier.ipynb)
-- [Training a differentially private LSTM model for name classification](https://github.com/pytorch/opacus/blob/main/tutorials/building_lstm_name_classifier.ipynb)
-- [Building text classifier with Differential Privacy on BERT](https://github.com/pytorch/opacus/blob/main/tutorials/building_text_classifier.ipynb)
-- [Opacus Guide: Introduction to advanced features](https://github.com/pytorch/opacus/blob/main/tutorials/intro_to_advanced_features.ipynb)
-- [Opacus Guide: Grad samplers](https://github.com/pytorch/opacus/blob/main/tutorials/guide_to_grad_sampler.ipynb)
-- [Opacus Guide: Module Validator and Fixer](https://github.com/pytorch/opacus/blob/main/tutorials/guide_to_module_validator.ipynb)
-
-## Technical report and citation
-The technical report introducing Opacus, presenting its design principles, mathematical foundations, and benchmarks can be found [here](https://arxiv.org/abs/2109.12298).
-
-Consider citing the report if you use Opacus in your papers, as follows:
+```python
+for dp_mode in ['dynamic']:
+    # runs only dynamic DP-SGD
 ```
-@article{opacus,
-  title={Opacus: {U}ser-Friendly Differential Privacy Library in {PyTorch}},
-  author={Ashkan Yousefpour and Igor Shilov and Alexandre Sablayrolles and Davide Testuggine and Karthik Prasad and Mani Malek and John Nguyen and Sayan Ghosh and Akash Bharadwaj and Jessica Zhao and Graham Cormode and Ilya Mironov},
-  journal={arXiv preprint arXiv:2109.12298},
-  year={2021}
+
+- Alternatively change the list to a multiple modes if you want to run multiple training loops.
+Flags to remember
+- For `RP` and `d2p2` modes include `--red_rate` on the command line or export it as an env var used by the `.sh` wrapper.
+- For DP modes, set `--sigma` (noise multiplier) and `--max-per-sample-grad_norm` appropriately.
+
+
+## 3) Output files and format
+Training runs save plots and JSON logs under `final/`, `log/`, or dataset-specific subfolders (for example `final/CNN_svhn1/`). Typical artifacts:
+
+- PNG plots — training curves and result visuals. Example path: `final/CNN_svhn1/2024-09-17 01:13:04_sigma_3.0_batch_1024_seed_42.png`
+- JSON files — per-run structured logs storing losses, accuracies, epsilons, and sigma per epoch. Example path: `final/CNN_svhn1/2024-09-17 01:13:04_sigma_3.0_batch_1024_seed_42.json`
+- Checkpoints — `checkpoint.tar` or `model_best.pth.tar` in repo root or experiment folders.
+
+
+The training scripts have a helper like `plot_combined_results(train_results, sigma, batch_size, red_rate, seed)`.  Key points:
+
+- `train_results` is a dictionary keyed by the optimizer/DP label (for example `"SGD"`, `"DP-SGD(static)"`, `"DP-SGD(dynamic)"`). Each value is itself a dict with arrays for the keys: `loss`, `acc`, `ep`, and `sigma`.
+- The plotting function creates a figure with two subplots: the top shows training loss vs epoch and the bottom shows test accuracy vs epoch. It iterates over `train_results.items()` and plots `result['loss']` and `result['acc']` for each label.
+- Filenames use a timestamp plus key hyper-parameters. For example in `fmnist.py` the filename is built as:
+
+```
+filename = f'final/CNN_Fmnist_tmlr/{current_time}_sigma_{sigma}_batch_{batch_size}_seed_{seed}'
+```
+
+This produces both `filename.png` (the plot) and `filename.json` (the structured log). The plot includes a `suptitle` with the sigma, batch, and red_rate for quick identification.
+- The PNG is created with matplotlib's `plt.savefig()`; the JSON is written using `json.dump(train_results, file, indent=4)` so it is human-readable and easy to parse programmatically.
+- The saved JSON follows the same structure used to draw the plots. 
+
+JSON structure example:
+
+```json
+{
+  "SGD": {
+    "loss": [2.26, 2.23, ...],
+    "acc": [0.1958, 0.1958, ...],
+    "ep": [0, 0, ...],
+    "sigma": [3.0, 3.0, ...]
+  },
+  "DP-SGD(static)": {
+    "loss": [2.25, 2.24, ...],
+    "acc": [0.1958, 0.1973, ...],
+    "ep": [0.145, 0.204, ...],
+    "sigma": [3.0, 3.0, ...]
+  },
+  "DP-SGD(dynamic)": { ... }
 }
 ```
 
-### Blogposts and talks
+The real JSON files contain full arrays for each epoch and each DP/mode tested. Use these JSON files to reproduce plots.
 
-If you want to learn more about DP-SGD and related topics, check out our series of blogposts and talks:
+Filepath edit (argparse + plotting change)
+----------------------------------------
 
-- [Differential Privacy Series Part 1 | DP-SGD Algorithm Explained](https://medium.com/pytorch/differential-privacy-series-part-1-dp-sgd-algorithm-explained-12512c3959a3)
-- [Differential Privacy Series Part 2 | Efficient Per-Sample Gradient Computation in Opacus](https://medium.com/pytorch/differential-privacy-series-part-2-efficient-per-sample-gradient-computation-in-opacus-5bf4031d9e22)
-- [PriCon 2020 Tutorial: Differentially Private Model Training with Opacus](https://www.youtube.com/watch?v=MWPwofiQMdE&list=PLUNOsx6Az_ZGKQd_p4StdZRFQkCBwnaY6&index=52)
-- [Differential Privacy on PyTorch | PyTorch Developer Day 2020](https://www.youtube.com/watch?v=l6fbl2CBnq0)
-- [Opacus v1.0 Highlights | PyTorch Developer Day 2021](https://www.youtube.com/watch?v=U1mszp8lzUI)
+1. Add an `--output-dir` argument in the script's `parse_args()`:
+
+```python
+parser.add_argument(
+    "--output-dir",
+    type=str,
+    default="final/CNN_fmnist",
+    help="Directory where PNG and JSON outputs will be saved",
+)
+```
+
+2. Update `plot_combined_results` to accept `output_dir` and create it if missing. Replace the `filename` logic with a safe timestamp and join to `output_dir`:
+
+```python
+import os
+from datetime import datetime
+
+def plot_combined_results(train_results, sigma, batch_size, red_rate, seed, output_dir="final/CNN_fmnist"):
+    os.makedirs(output_dir, exist_ok=True)
+    fig, axs = plt.subplots(2, figsize=(10, 10), dpi=400)
+    # ... plotting code unchanged ...
+
+    # safer timestamp (no colons)
+    current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = os.path.join(output_dir, f"{current_time}_sigma_{sigma}_batch_{batch_size}_seed_{seed}")
+    fig.suptitle(f"...")
+    plt.savefig(f"{filename}.png")
+    with open(f"{filename}.json", "w") as file:
+        json.dump(train_results, file, indent=4)
+
+```
+
+3. Call the plotting function passing the parsed argument from `main()`:
+
+```python
+plot_combined_results(train_results, args.sigma, args.batch_size, args.red_rate, args.seed, args.output_dir)
+```
 
 
-## FAQ
-Check out the [FAQ](https://opacus.ai/docs/faq) page for answers to some of the most frequently asked questions about differential privacy and Opacus.
+
+## Tips & notes
+- If a script uses `opacus` / differential privacy, some models require minor layer adjustments — `cifar2.py` runs `ModuleValidator` to detect unsupported layers.
+- If you change model code (`models.py`) and get validator errors, either adjust the model or switch to the simple `convnet` in `cifar10.py` for quick experiments.
+- For multi-GPU or Slurm clusters, see the `setup()` function in the scripts (`cifar2.py`/`cifar10.py`) — they detect Slurm environment variables and call `torch.distributed.init_process_group` accordingly.
+
+
 
 ## Contributing
-See the [CONTRIBUTING](https://github.com/pytorch/opacus/tree/main/CONTRIBUTING.md) file for how to help out.
-Do also check out the README files inside the repo to learn how the code is organized.
+### How to contribute
+- Add a model class:
+  1. Implement the new model in `models.py` following existing style (use `nn.Module`, provide a clear constructor and `forward`).
+  2. Keep GroupNorm/BatchNorm choices compatible with `opacus` where possible; if your model uses an unsupported layer, add a small note in the PR describing why and how to make it compatible.
+
+- Add a dataset/training script:
+  1. Create a dataset-specific training script (copy an existing one like `fmnist.py` or `cifar10.py` and adapt). Keep parsing of command-line args consistent using `argparse`.
+  2. Wire the model into the script (import the model from `models.py`), add a short validation run and use `plot_combined_results` or the shared plotting helper to write outputs.
+
+- Validation and compatibility:
+  - If the script supports DP (`opacus`), run `ModuleValidator.validate()` (see `cifar2.py`) and document any required fixes.
+  - Prefer `ModuleValidator.fix(model)` before training so contributors can spot unsupported layers early.
+
+- Outputs and reproducibility:
+  - Use the `--output-dir` argument or `D2P2_OUTPUT_DIR` env var to place PNG/JSON outputs in a predictable location.
+  - Add a small example run command in the new script's top-level docstring or the repo `README.md` table.
+
+ ### Minimal smoke test
+- Add a smoke test that:
+  - Instantiates the model, runs a single forward pass with dummy input, and ensures no exceptions are raised.
+  - Optionally runs a single training step (forward + backward) to catch shape/grad issues.
+
+## Acknowledgements
+This project builds on and is inspired by the [Opacus library](https://github.com/pytorch/opacus) for differential privacy in PyTorch. Thanks to the Opacus authors and the PyTorch community for their open-source work, which made developing the privacy tooling in this repo much easier.
+
+## Citation
+If you use this code in academic work, please cite the Opacus paper as well as this repository:
+
+<div align="right">📋 Copy</div>
+
+```bibtex
+@article{d2p2Zhanhong,
+  title={Balancing Utility and Privacy: Dynamically Private SGD with Random Projection},
+  author={Zhanhong Jiang and Md Zahid Hasan and Nastaran Saadati and Aditya Balu and Chao Liu and Soumik Sarkar},
+  journal={TMLR},
+  url = {https://openreview.net/pdf?id=u6OSRdkAwl},
+  year={2025}
+}
+```
 
 ## License
-This code is released under Apache 2.0, as found in the [LICENSE](https://github.com/pytorch/opacus/tree/main/LICENSE) file.
+This code is released under Apache 2.0, as found in the original Opacus repo [LICENSE](https://github.com/pytorch/opacus/tree/main/LICENSE) file.

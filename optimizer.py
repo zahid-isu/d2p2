@@ -208,6 +208,8 @@ class DPOptimizer(Optimizer):
         generator=None,
         secure_mode: bool = False,
         random_projection: bool = False,
+        seed: int = 1,
+        red_rate : float =0.3,
     ):
         """
 
@@ -244,6 +246,8 @@ class DPOptimizer(Optimizer):
         self.generator = generator
         self.secure_mode = secure_mode
         self.random_projection = random_projection
+        self.seed = seed
+        self.red_rate = red_rate
 
         self.param_groups = self.original_optimizer.param_groups
         self.defaults = self.original_optimizer.defaults
@@ -256,11 +260,11 @@ class DPOptimizer(Optimizer):
             p.summed_grad = None
 
     def _initialize_proj_matrix(self, p, original_dim, projection_dim, device):
-        torch.manual_seed(34444)
         state = self.state[p]
+        torch.manual_seed(self.seed)
         if 'proj_mat' not in state:
-            state['proj_mat'] = torch.randn(original_dim, projection_dim).to(device)
-            
+            state["proj_mat"] = torch.normal(0, 1, size=(original_dim, projection_dim)).to(device)
+            # state['proj_mat'] = torch.randn(original_dim, projection_dim).to(device)
 
     def _get_flat_grad_sample(self, p: torch.Tensor):
         """
@@ -418,8 +422,11 @@ class DPOptimizer(Optimizer):
             ]
             per_sample_norms = torch.stack(per_param_norms, dim=1).norm(2, dim=1)
             per_sample_clip_factor = (
-                self.max_grad_norm / (per_sample_norms + 1e-6)
-            ).clamp(max=1.0)
+                self.max_grad_norm / (per_sample_norms + 1e-6)   # gradient clipping  
+            )
+                # self.max_grad_norm / (per_sample_norms + 1e-6)   # set gamma= 1e-6, removed clamp(max=1.0)
+                # self.max_grad_norm / (per_sample_norms + 1e-6).clamp(max=1.0)
+            
 
         for p in self.params:
             _check_processed_flag(p.grad_sample)
@@ -434,29 +441,26 @@ class DPOptimizer(Optimizer):
             _mark_as_processed(p.grad_sample)
 
 
-    def _random_projection(self, gradient: torch.Tensor, p) -> torch.Tensor:
-    
+    def _random_projection(self, gradient: torch.Tensor, p, red_rate = 0.3) -> torch.Tensor:
+        
+        # print("red_rate", red_rate)
         grad_shape = gradient.shape # (32,3,3,3)
-        flattened_grad = gradient.view(grad_shape[0], -1) # (32, 27) 
+        flattened_grad = torch.flatten(gradient)
+        # flattened_grad = gradient.view(grad_shape[0], -1) # (32, 27) 
         original_dim = flattened_grad.shape[-1] # 27
-        projection_dim = original_dim // 2  # 50% reduction  13
-
-        # print(grad_shape, original_dim, projection_dim)
+        projection_dim = int(red_rate* original_dim)  # red_rate = 30% reduction  
         if 'proj_mat' not in self.state[p].keys():
             self._initialize_proj_matrix(p, original_dim, projection_dim, gradient.device)
 
         projection_matrix = self.state[p]['proj_mat']
+        # print(f"projection_matrix:{projection_matrix}")
 
-        # print(f">>>>>>>>>>>>>>> Proj matrix for param {p}: {projection_matrix}")
+        projected_grad = torch.matmul(projection_matrix.t(), flattened_grad)*(1 / np.sqrt(projection_dim))
+        # projected_grad = torch.matmul(flattened_grad, projection_matrix)* (1 / torch.sqrt(torch.tensor(projection_dim, dtype=torch.float32, device=gradient.device))) # Project the gradient
 
-       
-        projected_grad = torch.matmul(flattened_grad, projection_matrix)* (1 / np.sqrt(projection_dim)) # Project the gradient
-        # print("projection_matrix.shape", projection_matrix.shape)
-        # print("projected_grad.shape", projected_grad.shape)
 
-        
         # Check if the dimension matches
-        if projected_grad.shape[1] != projection_dim:
+        if projected_grad.shape[-1] != projection_dim:
             raise ValueError(f"Projected grad dim {projected_grad.shape[1]} doesn't match projection dim {projection_dim}")
         
         
@@ -469,11 +473,10 @@ class DPOptimizer(Optimizer):
             secure_mode= self.secure_mode,
         )
 
-        # print(" projected_grad.shape and noise.shape:", projected_grad.shape, noise.shape)
-
         assert projected_grad.shape == noise.shape, f"Projected grad shape {projected_grad.shape} and noise shape {noise.shape} doesn't match"
         noisy_projected_grad = projected_grad + noise # Add noise to the projected gradient
-        final_mat= torch.matmul(noisy_projected_grad, projection_matrix.t())
+        # final_mat= torch.matmul(noisy_projected_grad, projection_matrix.t())
+        final_mat = torch.matmul(projection_matrix, noisy_projected_grad)
         return noisy_projected_grad, final_mat # Map back to the original dimension
 
     def add_noise(self):
@@ -485,16 +488,10 @@ class DPOptimizer(Optimizer):
             _check_processed_flag(p.summed_grad)
 
             #Check RP 
-            # print("random_projection in add_noise:", self.random_projection)
             if self.random_projection:
-                noisy_projected_grad, final_mat = self._random_projection(p.summed_grad, p)
-
-                # print('noisy_projected_grad', noisy_projected_grad.shape)
-                # print('final_mat', final_mat.shape)
+                noisy_projected_grad, final_mat = self._random_projection(p.summed_grad, p, red_rate=self.red_rate)
                 p.grad = final_mat.view_as(p)
-                # print(final_mat.view_as(p).shape)
             else:
-                # print(" Not RP - regular noise")
                 noise = _generate_noise(
                     std=self.noise_multiplier * self.max_grad_norm,
                     reference=p.summed_grad,

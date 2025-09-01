@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-Runs MNIST training with differential privacy.
+Runs FashionMNIST training with differential privacy.
 
 """
 
@@ -35,10 +35,9 @@ import matplotlib.pyplot as plt
 import time
 
 
-
 # Precomputed characteristics of the MNIST dataset
-MNIST_MEAN = 0.1307
-MNIST_STD = 0.3081
+FASHIONMNIST_MEAN = 0.5
+FASHIONMNIST_STD = 0.5
 
 
 class SampleConvNet(nn.Module):
@@ -63,7 +62,8 @@ class SampleConvNet(nn.Module):
     def name(self):
         return "SampleConvNet"
 
-def plot_combined_results(train_results, sigma, batch_size, seed):
+def plot_combined_results(train_results, sigma, batch_size, red_rate, seed):
+
 
     fig, axs = plt.subplots(2, figsize=(10, 10), dpi=400)
 
@@ -88,15 +88,15 @@ def plot_combined_results(train_results, sigma, batch_size, seed):
 
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    filename = f'log/CNN_mnist/P200_red30_{current_time}_sigma_{sigma}_batch_{batch_size}_seed_{seed}'
-    fig.suptitle(f'CNN_MNIST_sigma_{sigma}_batch_{batch_size}', fontsize=16)
+    filename = f'final/CNN_Fmnist_tmlr/{current_time}_sigma_{sigma}_batch_{batch_size}_seed_{seed}'
+    fig.suptitle(f'CNN_FashionMNIST_sigma_{sigma}_batch_{batch_size}_rrate_{red_rate}', fontsize=16)
     plt.savefig(f"{filename}.png")
     
     with open(f"{filename}.json", "w") as file:
         json.dump(train_results, file, indent=4)
 
 
-def train(args, model, device, train_loader, optimizer, privacy_engine, epoch):
+def train(args, model, device, train_loader, optimizer, dp_mode, privacy_engine, epoch):
     model.train()
     criterion = nn.CrossEntropyLoss()
     losses = []
@@ -124,7 +124,10 @@ def train(args, model, device, train_loader, optimizer, privacy_engine, epoch):
                 epsilon=0
                 print(f"Train Epoch: {epoch} \t Loss: {np.mean(losses):.6f}")
 
-    return losses, epsilon
+    if dp_mode =="dynamic" or dp_mode =="d2p2":
+        return losses, optimizer.noise_multiplier, epsilon
+    else:
+        return losses, args.sigma, epsilon
 
 def test(model, device, test_loader):
     model.eval()
@@ -160,7 +163,11 @@ def main():
     
     args = parse_args()
     # device = torch.device(args.device)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     train_results = {} 
 
     for dp_mode in [None, "static","dynamic", "RP", "d2p2"]:
@@ -173,35 +180,35 @@ def main():
         print("random_projection=", random_projection)
 
         train_loader = torch.utils.data.DataLoader(
-            datasets.MNIST(
+            datasets.FashionMNIST(
                 args.data_root,
                 train=True,
                 download=True,
                 transform=transforms.Compose(
                     [
                         transforms.ToTensor(),
-                        transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
+                        transforms.Normalize((FASHIONMNIST_MEAN,), (FASHIONMNIST_STD,)),
                     ]
                 ),
             ),
             batch_size=args.batch_size,
-            num_workers=8,
+            num_workers=16,
             pin_memory=True,
         )
         test_loader = torch.utils.data.DataLoader(
-            datasets.MNIST(
+            datasets.FashionMNIST(
                 args.data_root,
                 train=False,
                 transform=transforms.Compose(
                     [
                         transforms.ToTensor(),
-                        transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
+                        transforms.Normalize((FASHIONMNIST_MEAN,), (FASHIONMNIST_MEAN,)),
                     ]
                 ),
             ),
             batch_size=args.test_batch_size,
             shuffle=True,
-            num_workers=8,
+            num_workers=16,
             pin_memory=True,
         )
         run_results = []
@@ -239,6 +246,7 @@ def main():
             accuracy_per_epoch = []
             train_losses =[]
             epsilon_per_epoch = []
+            sigma_per_epoch =[]
 
 
             for epoch in range(1, args.epochs + 1):
@@ -250,28 +258,33 @@ def main():
             
                 elif not args.disable_dp and dp_mode == 'RP':  # RP DP-SGD
                     optimizer.noise_multiplier = args.sigma
+                    optimizer.red_rate = args.red_rate
                 
                 elif not args.disable_dp and dp_mode == 'd2p2':  # D2P2 DP-SGD
                     new_noise_multiplier = args.sigma / (epoch ** 0.25)
                     optimizer.noise_multiplier = new_noise_multiplier
+                    optimizer.red_rate = args.red_rate
 
                     print(f"Epoch {epoch}: Updated d2p2 sigma to {new_noise_multiplier:.4f}")
                 
-                losses, epsilon = train(args, model, device, train_loader, optimizer, privacy_engine, epoch)
+                losses, sigma, epsilon = train(args, model, device, train_loader, optimizer, dp_mode, privacy_engine, epoch)
                 top1_acc = test(model, device, test_loader)
                 train_loss = np.mean(losses)
                 accuracy_per_epoch.append(float(top1_acc))
                 train_losses.append(train_loss)
                 epsilon_per_epoch.append(epsilon)
+                sigma_per_epoch.append(sigma)
             # run_results.append(top1_acc)
+            # train_results[dp_label] = (train_losses, accuracy_per_epoch, epsilon_per_epoch)
             train_results[dp_label] = {
                 'loss': train_losses,
                 'acc': accuracy_per_epoch,
-                'ep': epsilon_per_epoch
+                'ep': epsilon_per_epoch,
+                'sigma':sigma_per_epoch
             }
             print(train_results)
         
-    plot_combined_results(train_results, args.sigma, args.batch_size, args.seed)
+    plot_combined_results(train_results, args.sigma, args.batch_size,args.red_rate, args.seed)
 
 def parse_args():
     # Training settings
@@ -286,7 +299,7 @@ def parse_args():
         "-b",
         "--batch-size",
         type=int,
-        default=512,
+        default=1024,
         metavar="B",
         help="Batch size",
     )
@@ -301,7 +314,7 @@ def parse_args():
         "-n",
         "--epochs",
         type=int,
-        default=50,
+        default=1,
         metavar="N",
         help="number of epochs to train",
     )
@@ -323,7 +336,7 @@ def parse_args():
     parser.add_argument(
         "--sigma",
         type=float,
-        default=1.0,
+        default=3.0,
         metavar="S",
         help="Noise multiplier",
     )
@@ -381,12 +394,17 @@ def parse_args():
     parser.add_argument(
         "-p",
         "--print-freq",
-        default=10,
+        default=100,
         type=int,
         metavar="N",
         help="print frequency (default: 10)",
     )
-
+    parser.add_argument(
+        "--red_rate",
+        type=float,
+        default=0.3,
+        help="random proj rate",
+    )
     return parser.parse_args()
 
     # if len(run_results) > 1:

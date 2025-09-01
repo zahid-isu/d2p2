@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-Runs MNIST training with differential privacy.
+Runs EMNIST training with differential privacy.
 
 """
 
@@ -37,8 +37,8 @@ import time
 
 
 # Precomputed characteristics of the MNIST dataset
-MNIST_MEAN = 0.1307
-MNIST_STD = 0.3081
+EMNIST_MEAN = 0.5
+EMNIST_STD = 0.5
 
 
 class SampleConvNet(nn.Module):
@@ -65,12 +65,13 @@ class SampleConvNet(nn.Module):
 
 def plot_combined_results(train_results, sigma, batch_size, seed):
 
+    epochs = range(1, int(len(next(iter(train_results.values()))[0])) + 1)
     fig, axs = plt.subplots(2, figsize=(10, 10), dpi=400)
 
     # Plot training losses
-    for optim, result in train_results.items():
-        epochs = range(1, len(result['loss']) + 1)
-        axs[0].plot(epochs, result['loss'], label=f'{optim}', linewidth=2)
+    for optim, (train_losses, accuracy_per_epoch, epsilons, duration) in train_results.items():
+        epochs = range(1, len(train_losses) + 1)
+        axs[0].plot(epochs, train_losses, label=f'{optim}', linewidth=2)
     
     axs[0].set_xlabel('Epoch', fontsize=16)
     axs[0].set_ylabel('Training Loss', fontsize=16)
@@ -78,9 +79,9 @@ def plot_combined_results(train_results, sigma, batch_size, seed):
     axs[0].legend(loc='upper right', fontsize=12)
     
     # Plot testing accuracies
-    for optim, result in train_results.items():
-        epochs = range(1, len(result['acc']) + 1)
-        axs[1].plot(epochs, result['acc'], label=f'{optim}', linewidth=2)
+    for optim, (train_losses, accuracy_per_epoch, epsilons, duration) in train_results.items():
+        epochs = range(1, len(accuracy_per_epoch) + 1)
+        axs[1].plot(epochs, accuracy_per_epoch, label=f'{optim}', linewidth=2)
     
     axs[1].set_xlabel('Epoch', fontsize=16)
     axs[1].set_ylabel('Testing Accuracy', fontsize=16)
@@ -88,15 +89,33 @@ def plot_combined_results(train_results, sigma, batch_size, seed):
 
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    filename = f'log/CNN_mnist/P200_red30_{current_time}_sigma_{sigma}_batch_{batch_size}_seed_{seed}'
-    fig.suptitle(f'CNN_MNIST_sigma_{sigma}_batch_{batch_size}', fontsize=16)
+    filename = f'log/CNN_emnist/{current_time}_sigma_{sigma}_batch_{batch_size}_seed_{seed}'
+    fig.suptitle(f'CNN_EMNIST_sigma_{sigma}_batch_{batch_size}', fontsize=16)
     plt.savefig(f"{filename}.png")
+    
+
+    total_times_to_reach_accuracy = {}
+    target_accuracy=0.80
+
+    for dp_label, (train_losses, accuracy_per_epoch, epsilon, time_per_epoch) in train_results.items():
+        total_time = 0
+        for acc, epoch_time in zip(accuracy_per_epoch, time_per_epoch):
+            if acc >= target_accuracy:
+                total_times_to_reach_accuracy[dp_label] = total_time
+                break
+            total_time += epoch_time
+        else:
+            total_times_to_reach_accuracy[dp_label] = "t > train_time"
+    
+    with open(f"{filename}_time_comp.json", "w") as files:
+        json.dump(total_times_to_reach_accuracy, files, indent=4)
     
     with open(f"{filename}.json", "w") as file:
         json.dump(train_results, file, indent=4)
 
 
 def train(args, model, device, train_loader, optimizer, privacy_engine, epoch):
+    start_time = time.time()
     model.train()
     criterion = nn.CrossEntropyLoss()
     losses = []
@@ -111,20 +130,20 @@ def train(args, model, device, train_loader, optimizer, privacy_engine, epoch):
         optimizer.step()
         losses.append(loss.item())
 
-        if _batch_idx % args.print_freq == 0:
-            if not args.disable_dp:
-                epsilon =0 
-                epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
-                print(
-                    f"Train Epoch: {epoch} \t"
-                    f"Loss: {np.mean(losses):.6f} "
-                    f"(ε = {epsilon:.5f}, δ = {args.delta})"
-                )
-            else:
-                epsilon=0
-                print(f"Train Epoch: {epoch} \t Loss: {np.mean(losses):.6f}")
-
-    return losses, epsilon
+    if not args.disable_dp:
+        epsilon =0 
+        epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
+        print(
+            f"Train Epoch: {epoch} \t"
+            f"Loss: {np.mean(losses):.6f} "
+            f"(ε = {epsilon:.5f}, δ = {args.delta})"
+        )
+    else:
+        epsilon=0
+        print(f"Train Epoch: {epoch} \t Loss: {np.mean(losses):.6f}")
+    
+    train_duration = time.time()-start_time
+    return losses, train_duration, epsilon
 
 def test(model, device, test_loader):
     model.eval()
@@ -173,14 +192,15 @@ def main():
         print("random_projection=", random_projection)
 
         train_loader = torch.utils.data.DataLoader(
-            datasets.MNIST(
+            datasets.EMNIST(
                 args.data_root,
+                split="mnist",
                 train=True,
                 download=True,
                 transform=transforms.Compose(
                     [
                         transforms.ToTensor(),
-                        transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
+                        transforms.Normalize((EMNIST_MEAN,), (EMNIST_STD,)),
                     ]
                 ),
             ),
@@ -189,13 +209,14 @@ def main():
             pin_memory=True,
         )
         test_loader = torch.utils.data.DataLoader(
-            datasets.MNIST(
+            datasets.EMNIST(
                 args.data_root,
+                split="mnist",
                 train=False,
                 transform=transforms.Compose(
                     [
                         transforms.ToTensor(),
-                        transforms.Normalize((MNIST_MEAN,), (MNIST_STD,)),
+                        transforms.Normalize((EMNIST_MEAN,), (EMNIST_STD,)),
                     ]
                 ),
             ),
@@ -239,6 +260,7 @@ def main():
             accuracy_per_epoch = []
             train_losses =[]
             epsilon_per_epoch = []
+            time_per_epoch = []
 
 
             for epoch in range(1, args.epochs + 1):
@@ -257,18 +279,15 @@ def main():
 
                     print(f"Epoch {epoch}: Updated d2p2 sigma to {new_noise_multiplier:.4f}")
                 
-                losses, epsilon = train(args, model, device, train_loader, optimizer, privacy_engine, epoch)
+                losses, train_duration, epsilon = train(args, model, device, train_loader, optimizer, privacy_engine, epoch)
                 top1_acc = test(model, device, test_loader)
                 train_loss = np.mean(losses)
                 accuracy_per_epoch.append(float(top1_acc))
                 train_losses.append(train_loss)
                 epsilon_per_epoch.append(epsilon)
-            # run_results.append(top1_acc)
-            train_results[dp_label] = {
-                'loss': train_losses,
-                'acc': accuracy_per_epoch,
-                'ep': epsilon_per_epoch
-            }
+                time_per_epoch.append(train_duration)
+            run_results.append(top1_acc)
+            train_results[dp_label] = (train_losses, accuracy_per_epoch, epsilon_per_epoch, time_per_epoch)
             print(train_results)
         
     plot_combined_results(train_results, args.sigma, args.batch_size, args.seed)
@@ -301,7 +320,7 @@ def parse_args():
         "-n",
         "--epochs",
         type=int,
-        default=50,
+        default=1,
         metavar="N",
         help="number of epochs to train",
     )
@@ -377,14 +396,6 @@ def parse_args():
         type=str,
         default="../mnist",
         help="Where MNIST is/will be stored",
-    )
-    parser.add_argument(
-        "-p",
-        "--print-freq",
-        default=10,
-        type=int,
-        metavar="N",
-        help="print frequency (default: 10)",
     )
 
     return parser.parse_args()
